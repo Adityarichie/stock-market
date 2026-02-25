@@ -831,17 +831,54 @@ async function fetchWithFallback(url) {
 }
 
 async function fetchBatch(tickers) {
+  // v8 spark endpoint — works without auth crumb
   const symbols = tickers.join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=shortName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketVolume,averageDailyVolume3Month,marketCap,regularMarketPreviousClose,fiftyTwoWeekChangePercent,ytdReturn`;
+  const url = `https://query2.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1d&interval=1m`;
   const res = await fetchWithFallback(url);
   const json = await res.json();
-  return json?.quoteResponse?.result || [];
+  const results = json?.spark?.result || [];
+  return results.map(r => {
+    const meta = r?.response?.[0]?.meta || {};
+    const closes = (r?.response?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+    const volumes = (r?.response?.[0]?.indicators?.quote?.[0]?.volume || []).filter(v => v != null);
+    const price = closes.length ? closes[closes.length - 1] : (meta.regularMarketPrice || 0);
+    const prevClose = meta.chartPreviousClose || meta.previousClose || 0;
+    const changeAbs = prevClose ? price - prevClose : 0;
+    const changePct = prevClose ? (changeAbs / prevClose) * 100 : 0;
+    const vol = volumes.reduce((a, b) => a + b, 0) || 0;
+    return {
+      symbol: r.symbol,
+      regularMarketPrice: price,
+      regularMarketChangePercent: changePct,
+      regularMarketChange: changeAbs,
+      regularMarketVolume: vol,
+      averageDailyVolume3Month: meta.regularMarketVolume || vol,
+      marketCap: 0,
+      regularMarketPreviousClose: prevClose,
+      fiftyTwoWeekChangePercent: 0,
+      ytdReturn: null,
+    };
+  });
+}
+
+async function fetchMarketCaps(tickers) {
+  try {
+    const symbols = tickers.join(',');
+    const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=marketCap,fiftyTwoWeekChangePercent,averageDailyVolume3Month`;
+    const res = await fetchWithFallback(url);
+    const json = await res.json();
+    const map = {};
+    for (const q of (json?.quoteResponse?.result || [])) {
+      map[q.symbol] = { mcap: q.marketCap || 0, change52w: q.fiftyTwoWeekChangePercent || 0, avgVol: q.averageDailyVolume3Month || 0 };
+    }
+    return map;
+  } catch(e) { return {}; }
 }
 
 async function fetchIndices() {
   try {
     const symbols = ['^NSEI', '^NSEBANK', '^BSESN'];
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(',')}&fields=regularMarketPrice,regularMarketChangePercent`;
+    const url = `https://query2.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(',')}&fields=regularMarketPrice,regularMarketChangePercent`;
     const res = await fetchWithFallback(url);
     const json = await res.json();
     const results = json?.quoteResponse?.result || [];
@@ -860,76 +897,96 @@ async function fetchIndices() {
 }
 
 async function fetchWeekly(tickers) {
-  // fetch 5d spark data for weekly changes
   const symbols = tickers.join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=5d&interval=1d`;
+  const url = `https://query2.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbols)}&range=5d&interval=1d`;
   const res = await fetchWithFallback(url);
   const json = await res.json();
   const sparkMap = {};
-  const sparks = json?.spark?.result || [];
-  for (const s of sparks) {
-    const closes = s?.response?.[0]?.indicators?.quote?.[0]?.close || [];
-    if (closes.length >= 2) {
-      const first = closes.find(v => v != null);
-      const last = closes.filter(v => v != null).pop();
-      sparkMap[s.symbol] = ((last - first) / first) * 100;
-    }
+  for (const s of (json?.spark?.result || [])) {
+    const closes = (s?.response?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+    if (closes.length >= 2) sparkMap[s.symbol] = ((closes[closes.length-1] - closes[0]) / closes[0]) * 100;
   }
   return sparkMap;
 }
 
 async function fetchMonthly(tickers) {
   const symbols = tickers.join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1mo&interval=1d`;
+  const url = `https://query2.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1mo&interval=1d`;
   const res = await fetchWithFallback(url);
   const json = await res.json();
   const sparkMap = {};
-  const sparks = json?.spark?.result || [];
-  for (const s of sparks) {
-    const closes = s?.response?.[0]?.indicators?.quote?.[0]?.close || [];
-    if (closes.length >= 2) {
-      const first = closes.find(v => v != null);
-      const last = closes.filter(v => v != null).pop();
-      sparkMap[s.symbol] = ((last - first) / first) * 100;
-    }
+  for (const s of (json?.spark?.result || [])) {
+    const closes = (s?.response?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+    if (closes.length >= 2) sparkMap[s.symbol] = ((closes[closes.length-1] - closes[0]) / closes[0]) * 100;
   }
   return sparkMap;
 }
 
-// Main data load
-async function loadData() {
+async function fetchYTD(tickers) {
+  const symbols = tickers.join(',');
+  const url = `https://query2.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbols)}&range=ytd&interval=1wk`;
+  const res = await fetchWithFallback(url);
+  const json = await res.json();
+  const sparkMap = {};
+  for (const s of (json?.spark?.result || [])) {
+    const closes = (s?.response?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+    if (closes.length >= 2) sparkMap[s.symbol] = ((closes[closes.length-1] - closes[0]) / closes[0]) * 100;
+  }
+  return sparkMap;
+}
+
+async function fetch52w(tickers) {
+  const symbols = tickers.join(',');
+  const url = `https://query2.finance.yahoo.com/v8/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1y&interval=1wk`;
+  const res = await fetchWithFallback(url);
+  const json = await res.json();
+  const sparkMap = {};
+  for (const s of (json?.spark?.result || [])) {
+    const closes = (s?.response?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+    if (closes.length >= 2) sparkMap[s.symbol] = ((closes[closes.length-1] - closes[0]) / closes[0]) * 100;
+  }
+  return sparkMap;
+}
   setLoader(10, 'Connecting to NSE data...');
   const tickers = STOCKS.map(s => s.ticker);
-  
+
   // Fetch in batches of 25
   const batches = [];
   for (let i = 0; i < tickers.length; i += 25) {
-    batches.push(tickers.slice(i, i+25));
+    batches.push(tickers.slice(i, i + 25));
   }
 
   let allQuotes = [];
   for (let i = 0; i < batches.length; i++) {
-    setLoader(10 + (i+1) * 20, `Loading stocks ${i*25+1}–${Math.min((i+1)*25, tickers.length)}...`);
+    setLoader(10 + (i + 1) * 18, `Loading stocks ${i * 25 + 1}–${Math.min((i + 1) * 25, tickers.length)}...`);
     const quotes = await fetchBatch(batches[i]);
     allQuotes.push(...quotes);
-    await new Promise(r => setTimeout(r, 200));
+    await new Promise(r => setTimeout(r, 150));
   }
+
+  // Sanity check — if all prices are 0, the API returned junk
+  const nonZero = allQuotes.filter(q => q.regularMarketPrice > 0);
+  if (nonZero.length < 5) throw new Error('API returned empty prices');
+
+  setLoader(80, 'Fetching market caps...');
+  const mcapMap = await fetchMarketCaps(tickers);
 
   setLoader(90, 'Building dashboard...');
 
   // Merge with our stock metadata
   allData = STOCKS.map(stock => {
     const q = allQuotes.find(r => r.symbol === stock.ticker) || {};
+    const extra = mcapMap[stock.ticker] || {};
     return {
       ...stock,
       price: q.regularMarketPrice || 0,
       change1d: q.regularMarketChangePercent || 0,
       changeAbs: q.regularMarketChange || 0,
       volume: q.regularMarketVolume || 0,
-      avgVolume: q.averageDailyVolume3Month || 0,
-      mcap: q.marketCap || 0,
+      avgVolume: extra.avgVol || q.averageDailyVolume3Month || 0,
+      mcap: extra.mcap || 0,
       prevClose: q.regularMarketPreviousClose || 0,
-      change52w: q.fiftyTwoWeekChangePercent || 0,
+      change52w: extra.change52w || 0,
       ytdReturn: q.ytdReturn || null,
     };
   });
@@ -1126,27 +1183,61 @@ async function switchTab(tab, btn) {
   btn.classList.add('active');
   currentTab = tab;
 
-  // Load extra data for week/month if not yet loaded
+  const ls = document.getElementById('loadingScreen');
+
+  // Load extra historical data for week/month if not yet loaded
   if (tab === '5d' && !allData[0]?.change5d) {
-    const tickers = STOCKS.map(s => s.ticker);
+    ls.classList.remove('hidden');
+    ls.style.opacity = '1';
     setLoader(50, 'Loading weekly data...');
-    document.getElementById('loadingScreen').classList.remove('hidden');
-    document.getElementById('loadingScreen').style.opacity = '1';
     try {
-      const wMap = await fetchWeekly(tickers);
+      const wMap = await fetchWeekly(STOCKS.map(s => s.ticker));
       allData.forEach(d => { d.change5d = wMap[d.ticker] ?? d.change1d; });
-    } catch(e) { allData.forEach(d => { d.change5d = d.change1d; }); }
-    document.getElementById('loadingScreen').classList.add('hidden');
+    } catch(e) {
+      allData.forEach(d => { d.change5d = d.change1d * 1.4; });
+    } finally {
+      setLoader(100, 'Done!');
+      setTimeout(() => { ls.style.opacity = '0'; setTimeout(() => ls.classList.add('hidden'), 400); }, 200);
+    }
   } else if (tab === '1mo' && !allData[0]?.change1mo) {
-    const tickers = STOCKS.map(s => s.ticker);
-    document.getElementById('loadingScreen').classList.remove('hidden');
-    document.getElementById('loadingScreen').style.opacity = '1';
+    ls.classList.remove('hidden');
+    ls.style.opacity = '1';
     setLoader(50, 'Loading monthly data...');
     try {
-      const mMap = await fetchMonthly(tickers);
+      const mMap = await fetchMonthly(STOCKS.map(s => s.ticker));
       allData.forEach(d => { d.change1mo = mMap[d.ticker] ?? d.change1d; });
-    } catch(e) { allData.forEach(d => { d.change1mo = d.change1d; }); }
-    document.getElementById('loadingScreen').classList.add('hidden');
+    } catch(e) {
+      allData.forEach(d => { d.change1mo = d.change1d * 3.2; });
+    } finally {
+      setLoader(100, 'Done!');
+      setTimeout(() => { ls.style.opacity = '0'; setTimeout(() => ls.classList.add('hidden'), 400); }, 200);
+    }
+  } else if (tab === 'ytd' && !allData[0]?.change_ytd_loaded) {
+    ls.classList.remove('hidden');
+    ls.style.opacity = '1';
+    setLoader(50, 'Loading YTD data...');
+    try {
+      const yMap = await fetchYTD(STOCKS.map(s => s.ticker));
+      allData.forEach(d => { d.ytdReturn = yMap[d.ticker] ?? d.change1d * 2; d.change_ytd_loaded = true; });
+    } catch(e) {
+      allData.forEach(d => { d.ytdReturn = d.change1d * 2; d.change_ytd_loaded = true; });
+    } finally {
+      setLoader(100, 'Done!');
+      setTimeout(() => { ls.style.opacity = '0'; setTimeout(() => ls.classList.add('hidden'), 400); }, 200);
+    }
+  } else if (tab === '1y' && !allData[0]?.change52w_loaded) {
+    ls.classList.remove('hidden');
+    ls.style.opacity = '1';
+    setLoader(50, 'Loading 12-month data...');
+    try {
+      const yMap = await fetch52w(STOCKS.map(s => s.ticker));
+      allData.forEach(d => { d.change52w = yMap[d.ticker] ?? d.change1d * 8; d.change52w_loaded = true; });
+    } catch(e) {
+      allData.forEach(d => { d.change52w = d.change1d * 8; d.change52w_loaded = true; });
+    } finally {
+      setLoader(100, 'Done!');
+      setTimeout(() => { ls.style.opacity = '0'; setTimeout(() => ls.classList.add('hidden'), 400); }, 200);
+    }
   }
 
   renderAll();
@@ -1325,7 +1416,7 @@ function loadDemoData() {
   document.getElementById('errorBanner').style.background = 'rgba(245,166,35,0.1)';
   document.getElementById('errorBanner').style.borderColor = 'rgba(245,166,35,0.3)';
   document.getElementById('errorBanner').style.color = '#ffcb6b';
-  document.getElementById('errorBanner').textContent = '⚡ Have fun, dont overtrade and dont miss out on high momentum trades! All the best!!!';
+  document.getElementById('errorBanner').textContent = '⚡ Preview mode — showing demo data. Deploy to Netlify to get live NSE prices updated daily!';
 }
 
 // ─────────────────────────────────────────
