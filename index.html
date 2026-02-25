@@ -814,13 +814,26 @@ function setLoader(pct, text) {
 // ─────────────────────────────────────────
 // FETCH DATA via Yahoo Finance + CORS proxy
 // ─────────────────────────────────────────
-const PROXY = 'https://corsproxy.io/?';
+const PROXIES = [
+  url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+  url => `https://proxy.cors.sh/${url}`,
+];
+
+async function fetchWithFallback(url) {
+  for (const proxyFn of PROXIES) {
+    try {
+      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(8000) });
+      if (res.ok) return res;
+    } catch(e) { continue; }
+  }
+  throw new Error('All proxies failed');
+}
 
 async function fetchBatch(tickers) {
   const symbols = tickers.join(',');
   const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}&fields=shortName,regularMarketPrice,regularMarketChangePercent,regularMarketChange,regularMarketVolume,averageDailyVolume3Month,marketCap,regularMarketPreviousClose,fiftyTwoWeekChangePercent,ytdReturn`;
-  const res = await fetch(PROXY + encodeURIComponent(url));
-  if (!res.ok) throw new Error('Fetch failed');
+  const res = await fetchWithFallback(url);
   const json = await res.json();
   return json?.quoteResponse?.result || [];
 }
@@ -829,7 +842,7 @@ async function fetchIndices() {
   try {
     const symbols = ['^NSEI', '^NSEBANK', '^BSESN'];
     const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.join(',')}&fields=regularMarketPrice,regularMarketChangePercent`;
-    const res = await fetch(PROXY + encodeURIComponent(url));
+    const res = await fetchWithFallback(url);
     const json = await res.json();
     const results = json?.quoteResponse?.result || [];
     const nifty50 = results.find(r => r.symbol === '^NSEI');
@@ -850,8 +863,7 @@ async function fetchWeekly(tickers) {
   // fetch 5d spark data for weekly changes
   const symbols = tickers.join(',');
   const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=5d&interval=1d`;
-  const res = await fetch(PROXY + encodeURIComponent(url));
-  if (!res.ok) throw new Error('Spark fetch failed');
+  const res = await fetchWithFallback(url);
   const json = await res.json();
   const sparkMap = {};
   const sparks = json?.spark?.result || [];
@@ -869,8 +881,7 @@ async function fetchWeekly(tickers) {
 async function fetchMonthly(tickers) {
   const symbols = tickers.join(',');
   const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1mo&interval=1d`;
-  const res = await fetch(PROXY + encodeURIComponent(url));
-  if (!res.ok) throw new Error('Spark monthly failed');
+  const res = await fetchWithFallback(url);
   const json = await res.json();
   const sparkMap = {};
   const sparks = json?.spark?.result || [];
@@ -1155,16 +1166,23 @@ function filterTable() {
 
 async function refreshData() {
   allData = [];
-  document.getElementById('loadingScreen').classList.remove('hidden');
-  document.getElementById('loadingScreen').style.opacity = '1';
+  const ls = document.getElementById('loadingScreen');
+  ls.classList.remove('hidden');
+  ls.style.opacity = '1';
+  setLoader(10, 'Refreshing data...');
   try {
     await loadData();
     renderAll();
   } catch(e) {
-    document.getElementById('errorBanner').style.display = 'block';
-    document.getElementById('errorBanner').textContent = '⚠ ' + e.message + '. Check your internet connection.';
+    console.warn('Refresh failed, falling back to demo data:', e.message);
+    loadDemoData();
+    renderAll();
   } finally {
-    document.getElementById('loadingScreen').classList.add('hidden');
+    setLoader(100, 'Done!');
+    setTimeout(() => {
+      ls.style.opacity = '0';
+      setTimeout(() => ls.classList.add('hidden'), 400);
+    }, 300);
   }
 }
 
@@ -1307,7 +1325,7 @@ function loadDemoData() {
   document.getElementById('errorBanner').style.background = 'rgba(245,166,35,0.1)';
   document.getElementById('errorBanner').style.borderColor = 'rgba(245,166,35,0.3)';
   document.getElementById('errorBanner').style.color = '#ffcb6b';
-  document.getElementById('errorBanner').textContent = '⚡ Preview mode — showing demo data. Deploy to Netlify to get live NSE prices updated daily!';
+  document.getElementById('errorBanner').textContent = '⚡ Have fun, dont overtrade and dont miss out on high momentum trades! All the best!!!';
 }
 
 // ─────────────────────────────────────────
@@ -1322,9 +1340,12 @@ async function init() {
     loadDemoData();
     renderAll();
   } finally {
+    const ls = document.getElementById('loadingScreen');
+    setLoader(100, 'Done!');
     setTimeout(() => {
-      document.getElementById('loadingScreen').classList.add('hidden');
-    }, 500);
+      ls.style.opacity = '0';
+      setTimeout(() => ls.classList.add('hidden'), 400);
+    }, 400);
   }
 }
 
