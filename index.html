@@ -817,17 +817,43 @@ function setLoader(pct, text) {
 const PROXIES = [
   url => `https://corsproxy.io/?${encodeURIComponent(url)}`,
   url => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
-  url => `https://proxy.cors.sh/${url}`,
+  url => `https://thingproxy.freeboard.io/fetch/${url}`,
 ];
+
+// Fetch with a manual timeout (AbortSignal.timeout not supported everywhere)
+function fetchTimeout(url, ms = 5000) {
+  return new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => { controller.abort(); reject(new Error('Timeout')); }, ms);
+    fetch(url, { signal: controller.signal })
+      .then(r => { clearTimeout(timer); resolve(r); })
+      .catch(e => { clearTimeout(timer); reject(e); });
+  });
+}
 
 async function fetchWithFallback(url) {
   for (const proxyFn of PROXIES) {
     try {
-      const res = await fetch(proxyFn(url), { signal: AbortSignal.timeout(8000) });
-      if (res.ok) return res;
+      const res = await fetchTimeout(proxyFn(url), 5000);
+      if (res.ok) {
+        // Peek at JSON to make sure it's not an error wrapper
+        const text = await res.text();
+        const json = JSON.parse(text);
+        // Return a fake Response with the parsed json
+        return { ok: true, json: async () => json };
+      }
     } catch(e) { continue; }
   }
-  throw new Error('All proxies failed');
+  throw new Error('All proxies failed or timed out');
+}
+
+// Hard overall timeout — if loadData takes more than this, give up and use demo
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(v => { clearTimeout(timer); resolve(v); })
+           .catch(e => { clearTimeout(timer); reject(e); });
+  });
 }
 
 async function fetchBatch(tickers) {
@@ -1191,7 +1217,7 @@ async function switchTab(tab, btn) {
     ls.style.opacity = '1';
     setLoader(50, 'Loading weekly data...');
     try {
-      const wMap = await fetchWeekly(STOCKS.map(s => s.ticker));
+      const wMap = await withTimeout(fetchWeekly(STOCKS.map(s => s.ticker)), 10000, 'weekly');
       allData.forEach(d => { d.change5d = wMap[d.ticker] ?? d.change1d; });
     } catch(e) {
       allData.forEach(d => { d.change5d = d.change1d * 1.4; });
@@ -1204,7 +1230,7 @@ async function switchTab(tab, btn) {
     ls.style.opacity = '1';
     setLoader(50, 'Loading monthly data...');
     try {
-      const mMap = await fetchMonthly(STOCKS.map(s => s.ticker));
+      const mMap = await withTimeout(fetchMonthly(STOCKS.map(s => s.ticker)), 10000, 'monthly');
       allData.forEach(d => { d.change1mo = mMap[d.ticker] ?? d.change1d; });
     } catch(e) {
       allData.forEach(d => { d.change1mo = d.change1d * 3.2; });
@@ -1217,7 +1243,7 @@ async function switchTab(tab, btn) {
     ls.style.opacity = '1';
     setLoader(50, 'Loading YTD data...');
     try {
-      const yMap = await fetchYTD(STOCKS.map(s => s.ticker));
+      const yMap = await withTimeout(fetchYTD(STOCKS.map(s => s.ticker)), 10000, 'ytd');
       allData.forEach(d => { d.ytdReturn = yMap[d.ticker] ?? d.change1d * 2; d.change_ytd_loaded = true; });
     } catch(e) {
       allData.forEach(d => { d.ytdReturn = d.change1d * 2; d.change_ytd_loaded = true; });
@@ -1230,7 +1256,7 @@ async function switchTab(tab, btn) {
     ls.style.opacity = '1';
     setLoader(50, 'Loading 12-month data...');
     try {
-      const yMap = await fetch52w(STOCKS.map(s => s.ticker));
+      const yMap = await withTimeout(fetch52w(STOCKS.map(s => s.ticker)), 10000, '52w');
       allData.forEach(d => { d.change52w = yMap[d.ticker] ?? d.change1d * 8; d.change52w_loaded = true; });
     } catch(e) {
       allData.forEach(d => { d.change52w = d.change1d * 8; d.change52w_loaded = true; });
@@ -1261,19 +1287,21 @@ async function refreshData() {
   ls.classList.remove('hidden');
   ls.style.opacity = '1';
   setLoader(10, 'Refreshing data...');
+
+  const hideLoader = () => {
+    setLoader(100, 'Done!');
+    setTimeout(() => { ls.style.opacity = '0'; setTimeout(() => ls.classList.add('hidden'), 400); }, 300);
+  };
+
   try {
-    await loadData();
+    await withTimeout(loadData(), 15000, 'refresh');
     renderAll();
   } catch(e) {
-    console.warn('Refresh failed, falling back to demo data:', e.message);
+    console.warn('Refresh failed, showing demo:', e.message);
     loadDemoData();
     renderAll();
   } finally {
-    setLoader(100, 'Done!');
-    setTimeout(() => {
-      ls.style.opacity = '0';
-      setTimeout(() => ls.classList.add('hidden'), 400);
-    }, 300);
+    hideLoader();
   }
 }
 
@@ -1423,20 +1451,25 @@ function loadDemoData() {
 // INIT
 // ─────────────────────────────────────────
 async function init() {
-  try {
-    await loadData();
-    renderAll();
-  } catch(e) {
-    console.warn('Live data unavailable, loading demo data:', e.message);
-    loadDemoData();
-    renderAll();
-  } finally {
+  // Hard 15s deadline — if live data doesn't load in time, always show demo
+  const hideLoader = () => {
     const ls = document.getElementById('loadingScreen');
     setLoader(100, 'Done!');
     setTimeout(() => {
       ls.style.opacity = '0';
       setTimeout(() => ls.classList.add('hidden'), 400);
-    }, 400);
+    }, 300);
+  };
+
+  try {
+    await withTimeout(loadData(), 15000, 'loadData');
+    renderAll();
+  } catch(e) {
+    console.warn('Live data failed, showing demo:', e.message);
+    loadDemoData();
+    renderAll();
+  } finally {
+    hideLoader();
   }
 }
 
